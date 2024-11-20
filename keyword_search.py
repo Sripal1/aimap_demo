@@ -36,8 +36,8 @@ def loadEmbeddingModel():
 
 @st.cache_resource
 def loadLLM():
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B-Instruct")
-    model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-1B-Instruct")
+    tokenizer = AutoTokenizer.from_pretrained("microsoft/Phi-3-mini-4k-instruct")
+    model = AutoModelForCausalLM.from_pretrained("microsoft/Phi-3-mini-4k-instruct")
     return tokenizer, model
 
 @st.cache_resource
