@@ -1,66 +1,143 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import os
-from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
+import numpy as np
+from hybridSearch import HybridSearch
+import os
+import plotly.express as px
 
-gteModel = SentenceTransformer("thenlper/gte-small")
+st.set_page_config(
+    page_title="Professor Research Search",
+    page_icon="🎓",
+    layout="wide"
+)
 
-@st.cache_data
-def generateEmbedding(text):
-    if type(text) != str:
-        return gteModel.encode(" ")  # If abstract is missing, use placeholder
-    return gteModel.encode(text)
+st.markdown("""
+    <style>
+        .stAlert {
+            padding: 0.5rem;
+        }
+        .stProgress .st-bo {
+            height: 5px;
+        }
+        div[data-testid="stMetricValue"] {
+            font-size: 1.2rem;
+        }
+        .small-text {
+            font-size: 0.8rem;
+            color: #666;
+        }
+    </style>
+""", unsafe_allow_html=True)
 
-@st.cache_data
-def load_embeddings():
-    if os.path.exists("embeddingsMatrix.csv"):
-        return pd.read_csv("embeddingsMatrix.csv").values
-    else:
-        df = pd.read_csv("combinedData.csv")
-        df['embeddings'] = df['Abstract'].apply(generateEmbedding)
-        embeddingsMatrix = np.vstack(df['embeddings'].values)
-        embeddingMatrixCSV = pd.DataFrame(embeddingsMatrix)
-        embeddingMatrixCSV.to_csv("embeddingsMatrix.csv", index=False)
-        return embeddingsMatrix
+@st.cache_resource
+def load_model():
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
-@st.cache_data
-def load_combined_data():
-    return pd.read_csv("combinedData.csv")
+@st.cache_resource
+def initialize_search():
+    df = pd.read_csv('profData.csv')
+    df = df.dropna(subset=['Title', 'Abstract', 'AuthorKeywords'])
+    
+    df['concatenated'] = df['Title'] + ' ' + df['Abstract'] + ' ' + df['AuthorKeywords']
+    concatenated_documents = df['concatenated'].tolist()
+    
+    embeddings = np.load("embeddings.npy")
+    embeddings = np.array(embeddings).astype('float32')
+    
+    searcher = HybridSearch(concatenated_documents, embeddings, 0.7)
+    
+    return df, searcher
 
-# def getTopAbstracts(query, top_n=100):
-#     embeddingsMatrix = load_embeddings()
-#     query_embedding = generateEmbedding(query).reshape(1, -1)
-#     cosine_similarities = cosine_similarity(query_embedding, embeddingsMatrix).flatten()
-#     top_indices = np.argsort(cosine_similarities)[-top_n:][::-1]
-#     df = load_combined_data()
-#     top_papers = [{"Author": df.iloc[idx]["Author"], "Abstract": df.iloc[idx]["Abstract"], "Score": cosine_similarities[idx]} for idx in top_indices]
-#     return pd.DataFrame(top_papers)
+def create_frequency_chart(professor_frequencies):
+    df_freq = pd.DataFrame(professor_frequencies)
+    fig = px.bar(
+        df_freq,
+        x='count',
+        y='name',
+        orientation='h',
+        title='Frequently Appearing Professors',
+        labels={'count': 'Number of Relevant Papers', 'name': 'Professor'},
+    )
+    fig.update_layout(
+        showlegend=False,
+        xaxis_title="Number of Papers",
+        yaxis_title="Professor Name",
+        height=max(600, len(professor_frequencies) * 30)
+    )
+    return fig
 
-def getTopUniqueProfessors(query, top_n=10):
-    embeddingsMatrix = load_embeddings()
-    df = load_combined_data()
-    query_embedding = generateEmbedding(query).reshape(1, -1)
-    cosine_similarities = cosine_similarity(query_embedding, embeddingsMatrix).flatten()
-    df['Score'] = cosine_similarities
-    df_sorted = df.sort_values(by="Score", ascending=False).reset_index(drop=True)
-    top_papers = []
-    unique_professors = set()
-    for _, row in df_sorted.iterrows():
-        professor = row["Author"]
-        if professor not in unique_professors:
-            top_papers.append({"Author": professor, "Abstract": row["Abstract"], "Score": row["Score"]})
-            unique_professors.add(professor)
-        if len(top_papers) >= top_n:
-            break
-    return pd.DataFrame(top_papers)
+def main():
+    st.title("AiMap: Discover Researchers at Georgia Tech")
+    st.markdown("""
+        Find researchers at Georgia Tech based on your research interests or by uploading a research proposal.
+        Upload a research proposal or directly enter research area keywords.
+    """)
+    
+    try:
+        model = load_model()
+        df, searcher = initialize_search()
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
+        return
 
-st.title("Academic Paper Similarity Finder")
+    query = st.text_input(
+        "Enter research keyowrds:",
+        placeholder="machine learning, computer vision, robotics"
+    )
+    
+    search_query = query
+    if search_query:
+        with st.spinner("Searching..."):
+            query_embedding = model.encode(search_query)
+            results = searcher.search(search_query, query_embedding, top_k=100)
+            
+            processed_results = []
+            repeated_professors = {}
+            
+            for idx, score, doc in results:
+                author_name = df.iloc[idx]["Author"]
+                title = df.iloc[idx]["Title"]
+                abstract = df.iloc[idx]["Abstract"]
+                repeated_professors[author_name] = repeated_professors.get(author_name, 0) + 1
+                
+                processed_results.append({
+                    'author': author_name,
+                    'score': float(score),
+                    'title': title,
+                    'abstract': abstract
+                })
+            
+            professor_frequencies = [
+                {'name': author, 'count': count}
+                for author, count in sorted(repeated_professors.items(), key=lambda x: x[1], reverse=True)
+            ]
+            
+            col1, col2 = st.columns([1, 2])
+            
+            with col1:
+                st.plotly_chart(
+                    create_frequency_chart(professor_frequencies),
+                    use_container_width=True
+                )
+                
+                st.metric("# Professors", len(repeated_professors))
+                st.metric("# Searched Papers", len(results))
+            
+            with col2:
+                st.subheader("Most Relevant Papers with Scores")
+                for rank, result in enumerate(processed_results[:20], 1):
+                    st.markdown(f"""
+                        **{rank}. {result['author']}** *(Score: {result['score']:.3f})*
+                        
+                        <div class="small-text">
+                        **Title:** {result['title']}
+                        
+                        **Abstract:** {result['abstract']}
+                        </div>
+                        
+                        ---
+                    """, unsafe_allow_html=True)
 
-query = st.text_input("Enter your research query:", value="machine learning visualizations, human computer interaction, graph mining")
-
-if st.button("Find Top Unique Professors"):
-    st.write("Top Unique Professors:")
-    topProfessors = getTopUniqueProfessors(query)
-    st.write(topProfessors)
+if __name__ == "__main__":
+    main()
